@@ -23,7 +23,7 @@ class Sample(BaseModel):
 class InferenceRequest(BaseModel):
     """A request to an inference backend."""
 
-    messages: list[dict[str, str]]  # [{"role": "system", "content": "..."}, ...]
+    messages: list[dict[str, Any]]  # [{"role": "system", "content": "..." or [parts]}, ...]
     model: str
     max_tokens: int = 16384
     temperature: float = 1.0

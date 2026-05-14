@@ -9,15 +9,15 @@ import time
 
 from controllability.types import InferenceRequest, InferenceResponse
 
-# Model name -> renderer class name mapping
+# Model name -> (submodule, class name) mapping
 _RENDERER_MAP = {
-    "qwen3": "Qwen3Renderer",
-    "qwen3.5": "Qwen3Renderer",
-    "gpt-oss": "GptOssRenderer",
-    "deepseek-v3": "DeepSeekV3Renderer",
-    "llama-3": "Llama3Renderer",
-    "kimi-k2": "KimiK2Renderer",
-    "kimi-k2.5": "KimiK25Renderer",
+    "qwen3.5": ("tinker_cookbook.renderers.qwen3_5", "Qwen3_5Renderer"),
+    "qwen3": ("tinker_cookbook.renderers.qwen3", "Qwen3Renderer"),
+    "gpt-oss": ("tinker_cookbook.renderers.gpt_oss", "GptOssRenderer"),
+    "deepseek-v3": ("tinker_cookbook.renderers.deepseek_v3", "DeepSeekV3Renderer"),
+    "llama-3": ("tinker_cookbook.renderers.llama3", "Llama3Renderer"),
+    "kimi-k2.5": ("tinker_cookbook.renderers.kimi_k25", "KimiK25Renderer"),
+    "kimi-k2": ("tinker_cookbook.renderers.kimi_k2", "KimiK2Renderer"),
 }
 
 
@@ -28,7 +28,7 @@ def _get_renderer_class(model: str):
     # Try specific matches first (longer patterns first)
     for pattern in sorted(_RENDERER_MAP.keys(), key=len, reverse=True):
         if pattern in model_lower:
-            renderer_name = _RENDERER_MAP[pattern]
+            module_path, class_name = _RENDERER_MAP[pattern]
             break
     else:
         raise ValueError(
@@ -36,11 +36,12 @@ def _get_renderer_class(model: str):
             f"Known patterns: {list(_RENDERER_MAP.keys())}"
         )
 
-    import tinker_cookbook.renderers as renderers
+    import importlib
 
-    renderer_cls = getattr(renderers, renderer_name, None)
+    module = importlib.import_module(module_path)
+    renderer_cls = getattr(module, class_name, None)
     if renderer_cls is None:
-        raise ValueError(f"Renderer class '{renderer_name}' not found in tinker_cookbook.renderers")
+        raise ValueError(f"Renderer class '{class_name}' not found in {module_path}")
 
     return renderer_cls
 
@@ -162,19 +163,31 @@ class TinkerClient:
             parsed, _success = self._renderer.parse_response(response.sequences[0].tokens)
             raw_content = parsed.get("content", "")
 
-            # Split out reasoning trace from content.
+            # Renderer may return structured content (list of parts) instead
+            # of a plain string.  Extract thinking/text from the parts list.
+            content = ""
+            reasoning = ""
+            if isinstance(raw_content, list):
+                parts_thinking = []
+                parts_text = []
+                for part in raw_content:
+                    if isinstance(part, dict):
+                        if part.get("type") == "thinking":
+                            parts_thinking.append(part.get("thinking", ""))
+                        elif part.get("type") == "text":
+                            parts_text.append(part.get("text", ""))
+                reasoning = "\n".join(parts_thinking).strip()
+                content = "\n".join(parts_text).strip()
+            else:
+                content = raw_content
+
+            # Split out reasoning trace from content (fallback for string responses).
             # Model-specific formats:
             # - Qwen3/DeepSeek: <think>...</think> tags (or prompt forces <think>
             #   and entire response is reasoning with no closing tag)
             # - GPT-OSS: <|channel|>analysis<|message|>...<|end|>
             #            <|start|>assistant<|channel|>final<|message|>{answer}
-            content = raw_content
-            reasoning = ""
-
-            # Try <think>...</think> first (Qwen3, DeepSeek)
-            # The renderer may place <think> in the prompt, so the response
-            # may only contain </think> without an opening tag.
-            if "</think>" in content:
+            if not reasoning and isinstance(raw_content, str) and "</think>" in content:
                 think_match = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
                 if think_match:
                     # Both tags present
@@ -215,6 +228,10 @@ class TinkerClient:
             # it so callers see the full output (same as OpenRouter client).
             if request.prefill:
                 content = request.prefill + content
+
+            # Strip surrogate characters that break JSON serialization
+            content = content.encode("utf-8", errors="replace").decode("utf-8")
+            reasoning = reasoning.encode("utf-8", errors="replace").decode("utf-8")
 
             return InferenceResponse(
                 content=content,

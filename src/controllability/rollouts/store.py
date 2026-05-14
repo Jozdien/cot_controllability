@@ -13,12 +13,31 @@ def append_rollout(path: str | Path, rollout: Rollout) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as f:
-        f.write(_sanitize_jsonl(rollout.model_dump_json()) + "\n")
+        f.write(_sanitize_jsonl(_rollout_to_json(rollout)) + "\n")
 
 
 def _sanitize_jsonl(line: str) -> str:
     """Escape Unicode line/paragraph separators that break JSONL."""
     return line.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+
+
+def _strip_surrogates(obj):
+    """Recursively strip surrogate characters from strings in a dict/list."""
+    if isinstance(obj, str):
+        return obj.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+    if isinstance(obj, dict):
+        return {k: _strip_surrogates(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_strip_surrogates(v) for v in obj]
+    return obj
+
+
+def _rollout_to_json(rollout: Rollout) -> str:
+    """Serialize a Rollout to JSON, stripping surrogates if needed."""
+    try:
+        return rollout.model_dump_json()
+    except Exception:
+        return json.dumps(_strip_surrogates(rollout.model_dump()), ensure_ascii=False)
 
 
 def append_rollouts(path: str | Path, rollouts: list[Rollout]) -> None:
@@ -27,7 +46,7 @@ def append_rollouts(path: str | Path, rollouts: list[Rollout]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a") as f:
         for rollout in rollouts:
-            f.write(_sanitize_jsonl(rollout.model_dump_json()) + "\n")
+            f.write(_sanitize_jsonl(_rollout_to_json(rollout)) + "\n")
 
 
 def load_rollouts(path: str | Path) -> list[Rollout]:

@@ -19,6 +19,10 @@ dependencies = [
     "fast-langdetect>=0.3",
     "immutabledict>=4.0",
     "nltk>=3.9.1",
+    "packaging>=26.2",
+    "tinker>=0.18.2",
+    "openai>=2.32.0",
+    "matplotlib>=3.10.9",
 ]
 
 [project.optional-dependencies]
