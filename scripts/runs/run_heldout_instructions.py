@@ -261,7 +261,11 @@ async def main():
                     instr, resp.reasoning, resp.content or "", sample,
                 )
         elif not resp.error and not resp.reasoning:
-            row["error"] = "no_reasoning_trace"
+            # Model produced no reasoning trace (e.g. GPT-OSS bailing out of
+            # the analysis channel under prefill). Matches the hillclimb
+            # methodology: counts as a valid, non-compliant rollout.
+            row["compliant"] = False
+            row["judge_response"] = "empty_reasoning"
         rows.append(row)
 
     if judge_pending:
