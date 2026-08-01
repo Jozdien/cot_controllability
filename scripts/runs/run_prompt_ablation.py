@@ -72,13 +72,13 @@ def _scope_phrase() -> str:
     return "This applies ONLY to content inside <think> tags, not to your final response."
 
 
-def _wrap_reasoning_example(reasoning: str, answer: str) -> str | list:
+def _wrap_reasoning_example(reasoning: str, answer: str) -> str:
     """Wrap reasoning + answer as assistant content in the model's native format."""
     if _is_gptoss():
-        return [
-            {"type": "thinking", "thinking": reasoning},
-            {"type": "text", "text": answer},
-        ]
+        # GPT-OSS reasoning is opaque across turns — the model cannot see
+        # the `reasoning` field from previous assistant messages. Embed
+        # reasoning in content so the model actually sees the example.
+        return f"[Analysis]\n{reasoning}\n[/Analysis]\n\n{answer}"
     return f"<think>\n{reasoning}\n</think>\n\n{answer}"
 
 

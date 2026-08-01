@@ -5,10 +5,14 @@ Word suppression uses simple frequency-based keyword removal.
 
 Usage:
     uv run python scripts/runs/generate_fewshot_from_rollouts.py
+    uv run python scripts/runs/generate_fewshot_from_rollouts.py --max-chars 0 --num-examples 15
+    uv run python scripts/runs/generate_fewshot_from_rollouts.py --max-chars 4000 --output-suffix long
+    uv run python scripts/runs/generate_fewshot_from_rollouts.py --models qwen3-8b,qwen3-32b,qwen3-235b
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import random
 import re
@@ -123,6 +127,8 @@ def generate_examples(
     rollout_path: Path,
     train_ids: set[str],
     sample_map: dict[str, Sample],
+    max_chars: int = MAX_REASONING_CHARS,
+    num_examples: int = NUM_EXAMPLES,
 ) -> list[dict]:
     rollouts = load_rollouts_raw(rollout_path)
 
@@ -139,6 +145,16 @@ def generate_examples(
     rng = random.Random(SEED)
     all_examples: list[dict] = []
 
+    # When max_chars > 0, compute per-mode limits scaled proportionally
+    # to the original defaults. When max_chars == 0, no truncation at all.
+    if max_chars > 0:
+        scale = max_chars / MAX_REASONING_CHARS
+        scaled_mode_max_chars = {
+            m: int(v * scale) for m, v in _MODE_MAX_CHARS.items()
+        }
+    else:
+        scaled_mode_max_chars = {}
+
     for mode in MODES:
         pool = by_mode.get(mode, [])
         if not pool:
@@ -153,10 +169,10 @@ def generate_examples(
 
         rng.shuffle(pool)
         examples: list[dict] = []
-        mode_max_chars = _MODE_MAX_CHARS.get(mode, MAX_REASONING_CHARS)
+        mode_max_chars = scaled_mode_max_chars.get(mode, max_chars) if max_chars > 0 else 0
 
         for r in pool:
-            if len(examples) >= NUM_EXAMPLES:
+            if len(examples) >= num_examples:
                 break
 
             sid = r["sample"]["id"]
@@ -167,7 +183,10 @@ def generate_examples(
             reasoning = r["reasoning"]
             response = r.get("response", "")
 
-            tr = lambda t: truncate_reasoning(t, mode_max_chars)
+            def tr(t: str) -> str:
+                if mode_max_chars > 0:
+                    return truncate_reasoning(t, mode_max_chars)
+                return t
 
             if mode == "lowercase_thinking":
                 transformed = tr(reasoning.lower())
@@ -248,18 +267,72 @@ def generate_examples(
     return all_examples
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Generate few-shot examples from existing 0-shot rollouts.",
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=0,
+        help="Maximum reasoning chars (0 = no truncation). Default: 0.",
+    )
+    parser.add_argument(
+        "--num-examples",
+        type=int,
+        default=NUM_EXAMPLES,
+        help=f"Number of examples per mode. Default: {NUM_EXAMPLES}.",
+    )
+    parser.add_argument(
+        "--output-suffix",
+        type=str,
+        default="",
+        help="Suffix for output filename. If provided, output is fewshot_examples_{model}_{suffix}.jsonl.",
+    )
+    parser.add_argument(
+        "--models",
+        type=str,
+        default="qwen3-8b,qwen3-32b,gpt-oss-20b,gpt-oss-120b",
+        help="Comma-separated model patterns. Default: 'qwen3-8b,qwen3-32b,gpt-oss-20b,gpt-oss-120b'.",
+    )
+    return parser.parse_args()
+
+
 def main():
-    rollout_files = {}
+    args = parse_args()
+    model_patterns = [p.strip() for p in args.models.split(",") if p.strip()]
+
+    rollout_files: dict[str, Path] = {}
+
+    # Qwen models in results/rollouts/
     results_dir = Path("results/rollouts")
     for p in results_dir.glob("qwen_qwen3-*_cotcontrol_all_*.jsonl"):
         name = p.name
-        if "qwen3-8b" in name:
-            rollout_files["qwen/qwen3-8b"] = p
-        elif "qwen3-32b" in name:
-            rollout_files["qwen/qwen3-32b"] = p
+        for pattern in model_patterns:
+            if pattern in name:
+                model_key = f"qwen/{pattern}"
+                rollout_files[model_key] = p
+                break
+
+    # GPT-OSS models: check multiple locations
+    gptoss_paths = {
+        "gpt-oss-20b": [
+            Path("results/fewshot_gptoss_20b/eval_gpt-oss-20b_0shot.jsonl"),
+            Path("results/rollouts_gptoss/eval_gpt-oss-20b_0shot.jsonl"),
+        ],
+        "gpt-oss-120b": [
+            Path("results/fewshot_gptoss_120b/eval_gpt-oss-120b_0shot.jsonl"),
+        ],
+    }
+    for pattern in model_patterns:
+        if pattern in gptoss_paths:
+            for p in gptoss_paths[pattern]:
+                if p.exists():
+                    rollout_files[f"openai/{pattern}"] = p
+                    break
 
     if not rollout_files:
-        print("No 0-shot rollout files found in results/rollouts/")
+        print("No 0-shot rollout files found")
         return
 
     dataset = load_dataset("cotcontrol")
@@ -267,6 +340,11 @@ def main():
     train_ids = {s.id for s in train_samples}
     sample_map = {s.id: s for s in train_samples}
     print(f"Loaded {len(train_samples)} train-split samples")
+    if args.max_chars == 0:
+        print("Truncation: disabled (full-length reasoning)")
+    else:
+        print(f"Truncation: max {args.max_chars} chars")
+    print(f"Examples per mode: {args.num_examples}")
 
     output_dir = Path("results/fewshot")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -274,9 +352,17 @@ def main():
     for model, rollout_path in sorted(rollout_files.items()):
         model_short = model.split("/")[-1]
         print(f"\n{model_short}:")
-        examples = generate_examples(model, rollout_path, train_ids, sample_map)
+        examples = generate_examples(
+            model, rollout_path, train_ids, sample_map,
+            max_chars=args.max_chars,
+            num_examples=args.num_examples,
+        )
 
-        output_path = output_dir / f"fewshot_examples_{model_short}.jsonl"
+        if args.output_suffix:
+            filename = f"fewshot_examples_{model_short}_{args.output_suffix}.jsonl"
+        else:
+            filename = f"fewshot_examples_{model_short}.jsonl"
+        output_path = output_dir / filename
         with open(output_path, "w") as f:
             for ex in examples:
                 f.write(json.dumps(ex) + "\n")
